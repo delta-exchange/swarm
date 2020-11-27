@@ -58,7 +58,17 @@ defmodule Swarm.Tracker do
     do: GenStateMachine.call(__MODULE__, {:whereis, name}, :infinity)
 
   @doc """
-  Hand off all the processes running on the given worker to the remaining nodes in the cluster.
+  Hand off all the processes running on the node to the remaining nodes in the cluster.
+  This can be used to gracefully shut down a node.
+  Note that if you don't shut down the node after the handoff a rebalance can lead to processes being scheduled on it again.
+  In other words the handoff doesn't blacklist the node for further rebalances.
+  """
+  def handoff_node(),
+    do: GenStateMachine.call(__MODULE__, {:handoff_node}, :infinity)
+
+  @doc """
+  Hand off a single process with name = worker_name to the remaining nodes in the cluster.
+  Accepts handoff state as the second parameter
   This can be used to gracefully shut down a node.
   Note that if you don't shut down the node after the handoff a rebalance can lead to processes being scheduled on it again.
   In other words the handoff doesn't blacklist the node for further rebalances.
@@ -1221,6 +1231,22 @@ defmodule Swarm.Tracker do
         end
     end
 
+    GenStateMachine.reply(from, :finished)
+    :keep_state_and_data
+  end
+
+  defp handle_call({:handoff_node}, from, state) do
+    info("requested for all processes to be terminated and resumed on other nodes")
+    Registry.reduce(state, fn
+      entry(name: name, pid: pid, meta: %{mfa: mfa} = meta) = obj, state
+      when node(pid) == current_node ->
+        GenStateMachine.call(__MODULE__, {:handoff, name, nil}, :infinity)
+        state
+      obj, state ->
+        # Do nothing
+        state
+    end)
+    
     GenStateMachine.reply(from, :finished)
     :keep_state_and_data
   end
