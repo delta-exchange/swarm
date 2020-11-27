@@ -1193,20 +1193,28 @@ defmodule Swarm.Tracker do
     GenStateMachine.reply(from, :ok)
     {:keep_state, new_state}
   end
+
   defp handle_call({:handoff, worker_name, handoff_state}, from, state) do
     Registry.get_by_name(worker_name)
     |> case do
       :undefined ->
         # Worker was already removed from registry -> do nothing
         debug "The node #{worker_name} was not found in the registry"
-      entry(name: name, pid: pid, meta: %{mfa: _mfa} = meta) = obj ->
+      entry(name: name, pid: pid, meta: %{mfa: mfa} = meta) = obj ->
         case Strategy.remove_node(state.strategy, state.self) |> Strategy.key_to_node(name) do
           {:error, {:invalid_ring, :no_nodes}} ->
             debug "Cannot handoff #{inspect name} because there is no other node left"
           other_node ->
             debug "#{inspect name} has requested to be terminated and resumed on another node"
-            {:ok, state} = remove_registration(obj, state)
-            send(pid, {:swarm, :die})
+
+            { m, _f, _a} = mfa
+            cond do
+              Enum.member?(m.module_info[:attributes][:behaviour], Supervisor) ->
+                {:ok, state} = remove_registration(obj, state)
+              true ->
+                {:ok, state} = remove_registration(obj, state)
+                send(pid, {:swarm, :die})
+            end
             debug "sending handoff for #{inspect name} to #{other_node}"
             GenStateMachine.cast({__MODULE__, other_node},
                                  {:handoff, self(), {name, meta, handoff_state, Clock.peek(state.clock)}})
@@ -1216,6 +1224,7 @@ defmodule Swarm.Tracker do
     GenStateMachine.reply(from, :finished)
     :keep_state_and_data
   end
+  
   defp handle_call(msg, _from, _state) do
     warn("unrecognized call: #{inspect(msg)}")
     :keep_state_and_data
