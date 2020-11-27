@@ -1647,11 +1647,11 @@ defmodule Swarm.Tracker do
        when attempts <= @retry_max_attempts do
     case :rpc.call(node, :application, :which_applications, []) do
       app_list when is_list(app_list) ->
-        apps_to_be_started = [ :swarm | Application.get_env(:swarm, :dependent_apps, false)]
+        apps_to_be_started = [ :swarm | Application.get_env(:swarm, :dependent_apps, [])]
         all_apps_started = apps_to_be_started |> Enum.reduce(true, fn app_name, all_apps_started ->
           all_apps_started && !is_nil(List.keyfind(app_list, app_name, 0))
         end)
-        
+
         if all_apps_started do
           info("nodeup #{node}")
 
