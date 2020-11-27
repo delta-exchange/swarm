@@ -834,12 +834,12 @@ defmodule Swarm.Tracker do
   # This is the callback for when a nodeup/down event occurs after the tracker has entered
   # the main receive loop. Topology changes are handled a bit differently during startup.
   defp handle_topology_change({type, remote_node}, %TrackerState{} = state) do
-    debug("topology change (#{type} for #{remote_node})")
+    info("topology change (#{type} for #{remote_node})")
     current_node = state.self
 
     new_state =
       Registry.reduce(state, fn
-        entry(name: name, pid: pid, meta: %{mfa: _mfa} = meta) = obj, state
+        entry(name: name, pid: pid, meta: %{mfa: mfa} = meta) = obj, state
         when node(pid) == current_node ->
           case Strategy.key_to_node(state.strategy, name) do
             :undefined ->
@@ -854,35 +854,48 @@ defmodule Swarm.Tracker do
               state
 
             other_node ->
-              debug("#{inspect(pid)} belongs on #{other_node}")
+              info("#{inspect(pid)} belongs on #{other_node}")
               # This process needs to be moved to the new node
               try do
-                case GenServer.call(pid, {:swarm, :begin_handoff}) do
-                  :ignore ->
-                    debug("#{inspect(name)} has requested to be ignored")
-                    state
-
-                  {:resume, handoff_state} ->
-                    debug("#{inspect(name)} has requested to be resumed")
-                    {:ok, new_state} = remove_registration(obj, state)
-                    send(pid, {:swarm, :die})
-                    debug("sending handoff for #{inspect(name)} to #{other_node}")
-
-                    GenStateMachine.cast(
-                      {__MODULE__, other_node},
-                      {:handoff, self(), {name, meta, handoff_state, Clock.peek(new_state.clock)}}
-                    )
-
-                    new_state
-
-                  :restart ->
+                { m, _f, _a} = mfa
+                cond do
+                  Enum.member?(m.module_info[:attributes][:behaviour], Supervisor) ->
                     debug("#{inspect(name)} has requested to be restarted")
                     {:ok, new_state} = remove_registration(obj, state)
-                    send(pid, {:swarm, :die})
+                    Supervisor.stop(pid, :swarm_handoff)
 
                     case do_track(%Tracking{name: name, meta: meta}, new_state) do
                       :keep_state_and_data -> new_state
                       {:keep_state, new_state} -> new_state
+                    end
+                  Enum.member?(m.module_info[:attributes][:behaviour], GenServer) ->
+                    case GenServer.call(pid, {:swarm, :begin_handoff}) do
+                      :ignore ->
+                        debug("#{inspect(name)} has requested to be ignored")
+                        state
+
+                      {:resume, handoff_state} ->
+                        debug("#{inspect(name)} has requested to be resumed")
+                        {:ok, new_state} = remove_registration(obj, state)
+                        send(pid, {:swarm, :die})
+                        debug("sending handoff for #{inspect(name)} to #{other_node}")
+
+                        GenStateMachine.cast(
+                          {__MODULE__, other_node},
+                          {:handoff, self(), {name, meta, handoff_state, Clock.peek(new_state.clock)}}
+                        )
+
+                        new_state
+
+                      :restart ->
+                        debug("#{inspect(name)} has requested to be restarted")
+                        {:ok, new_state} = remove_registration(obj, state)
+                        send(pid, {:swarm, :die})
+
+                        case do_track(%Tracking{name: name, meta: meta}, new_state) do
+                          :keep_state_and_data -> new_state
+                          {:keep_state, new_state} -> new_state
+                        end
                     end
                 end
               catch
@@ -1634,34 +1647,36 @@ defmodule Swarm.Tracker do
        when attempts <= @retry_max_attempts do
     case :rpc.call(node, :application, :which_applications, []) do
       app_list when is_list(app_list) ->
-        case List.keyfind(app_list, :swarm, 0) do
-          {:swarm, _, _} ->
-            info("nodeup #{node}")
+        apps_to_be_started = [ :swarm | Application.get_env(:swarm, :dependent_apps, false)]
+        all_apps_started = apps_to_be_started |> Enum.reduce(true, fn app_name, all_apps_started ->
+          all_apps_started && !is_nil(List.keyfind(app_list, app_name, 0))
+        end)
+        
+        if all_apps_started do
+          info("nodeup #{node}")
 
-            new_state = %{
-              state
-              | nodes: [node | nodes],
-                strategy: Strategy.add_node(strategy, node)
-            }
+          new_state = %{
+            state
+            | nodes: [node | nodes],
+              strategy: Strategy.add_node(strategy, node)
+          }
 
-            {:ok, new_state, {:topology_change, {:nodeup, node}}}
-
-          nil ->
-            debug(
-              "nodeup for #{node} was ignored because swarm not started yet, will retry in #{
-                @retry_interval
-              }ms.."
-            )
-
-            Process.send_after(
-              self(),
-              {:ensure_swarm_started_on_remote_node, node, attempts + 1},
+          {:ok, new_state, {:topology_change, {:nodeup, node}}}
+        else
+          debug(
+            "nodeup for #{node} was ignored because swarm & dependent apps not started yet, will retry in #{
               @retry_interval
-            )
+            }ms.."
+          )
 
-            {:ok, state}
+          Process.send_after(
+            self(),
+            {:ensure_swarm_started_on_remote_node, node, attempts + 1},
+            @retry_interval
+          )
+
+          {:ok, state}
         end
-
       other ->
         warn("nodeup for #{node} was ignored because: #{inspect(other)}")
         {:ok, state}
