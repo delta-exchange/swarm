@@ -897,6 +897,10 @@ defmodule Swarm.Tracker do
                           {:keep_state, new_state} -> new_state
                         end
                     end
+                  true ->
+                    # Cant handoff as neither a genserver not a supervisor
+                    debug("#{inspect(name)} - ignoring handoff due to unknown behaviour")
+                    state
                 end
               catch
                 _, err ->
