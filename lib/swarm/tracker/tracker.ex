@@ -812,7 +812,9 @@ defmodule Swarm.Tracker do
         :undefined ->
           {{m, f, a}, _other_meta} = Map.pop(meta, :mfa)
           {:ok, pid} = apply(m, f, a)
-          GenServer.cast(pid, {:swarm, :end_handoff, handoff_state})
+          if Enum.member?(m.module_info[:attributes][:behaviour], GenServer) do
+            GenServer.cast(pid, {:swarm, :end_handoff, handoff_state})
+          end
           ref = Process.monitor(pid)
           lclock = Clock.join(clock, rclock)
           Registry.new!(entry(name: name, pid: pid, ref: ref, meta: meta, clock: lclock))
@@ -1221,6 +1223,7 @@ defmodule Swarm.Tracker do
             cond do
               Enum.member?(m.module_info[:attributes][:behaviour], Supervisor) ->
                 {:ok, state} = remove_registration(obj, state)
+                Supervisor.stop(pid)
               true ->
                 {:ok, state} = remove_registration(obj, state)
                 send(pid, {:swarm, :die})
@@ -1236,11 +1239,30 @@ defmodule Swarm.Tracker do
   end
 
   defp handle_call({:handoff_node}, from, state) do
+    current_node = state.self
     info("requested for all processes to be terminated and resumed on other nodes")
     Registry.reduce(state, fn
       entry(name: name, pid: pid, meta: %{mfa: mfa} = meta) = obj, state
       when node(pid) == current_node ->
-        GenStateMachine.call(__MODULE__, {:handoff, name, nil}, :infinity)
+        case Strategy.remove_node(state.strategy, state.self) |> Strategy.key_to_node(name) do
+          {:error, {:invalid_ring, :no_nodes}} ->
+            debug "Cannot handoff #{inspect name} because there is no other node left"
+          other_node ->
+            debug "#{inspect name} has requested to be terminated and resumed on another node"
+            handoff_state = :sys.get_state(pid)
+            { m, _f, _a} = mfa
+            cond do
+              Enum.member?(m.module_info[:attributes][:behaviour], Supervisor) ->
+                {:ok, state} = remove_registration(obj, state)
+                Supervisor.stop(pid)
+              true ->
+                {:ok, state} = remove_registration(obj, state)
+                send(pid, {:swarm, :die})
+            end
+            debug "sending handoff for #{inspect name} to #{other_node}"
+            GenStateMachine.cast({__MODULE__, other_node},
+                                 {:handoff, self(), {name, meta, handoff_state, Clock.peek(state.clock)}})
+        end
         state
       obj, state ->
         # Do nothing
