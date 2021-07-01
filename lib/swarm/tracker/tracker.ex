@@ -199,6 +199,7 @@ defmodule Swarm.Tracker do
     info("no connected nodes, proceeding without sync")
     interval = Application.get_env(:swarm, :anti_entropy_interval, @default_anti_entropy_interval)
     Process.send_after(self(), :anti_entropy, interval)
+    before_tracking()
     {:next_state, :tracking, %{state | clock: Clock.seed()}}
   end
 
@@ -265,6 +266,7 @@ defmodule Swarm.Tracker do
       [] ->
         info("no other available nodes, cancelling sync")
         new_state = %{state | sync_node: nil, sync_ref: nil}
+        before_tracking()
         {:next_state, :tracking, new_state}
 
       new_nodes ->
@@ -299,6 +301,7 @@ defmodule Swarm.Tracker do
             sync_ref: nil
         }
 
+        before_tracking()
         {:next_state, :tracking, new_state}
 
       new_nodes ->
@@ -369,6 +372,7 @@ defmodule Swarm.Tracker do
           "a problem occurred during sync, but no other available sync targets, becoming seed node"
         )
 
+        before_tracking()
         {:next_state, :tracking, %{state | pending_sync_reqs: [], sync_node: nil, sync_ref: nil}}
     end
   end
@@ -546,6 +550,7 @@ defmodule Swarm.Tracker do
       ref -> Process.demonitor(ref, [:flush])
     end
 
+    before_tracking()
     {:next_state, :tracking, %{state | sync_node: nil, sync_ref: nil}}
   end
 
@@ -1711,4 +1716,17 @@ defmodule Swarm.Tracker do
       entry(name: name, pid: pid, ref: ref, meta: meta, clock: Clock.peek(clock))
     end)
   end
+
+  defp before_tracking() do
+    info("BEFORE TRACKING")
+
+    try do
+      apply(TradingEngine.Actors.ClusterManager, :bootstrap)
+      info("BOOTSTRAPPED")
+    rescue
+      _ -> info("FAILED BOOTSTRAPPING")
+    end
+
+  end
+
 end
